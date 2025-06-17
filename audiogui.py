@@ -4,13 +4,21 @@ import pyqtgraph as pg
 from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QComboBox, QLabel, QCheckBox, QPushButton, QFileDialog
 from fft_filters import peak_picking, harmonic_masking, smoothing
+import csv
 
 SAMPLE_RATE = 44100
 FFT_SIZE = 1024
 HOP_SIZE = 512
 window = np.hanning(FFT_SIZE)
 
-import csv
+def get_note_bins():
+    bins = []
+    for midi in range(21, 109):  # A0 to C8
+        center = 440 * 2 ** ((midi - 69) / 12)
+        lower = 440 * 2 ** ((midi - 69 - 0.5) / 12)
+        upper = 440 * 2 ** ((midi - 69 + 0.5) / 12)
+        bins.append((midi, center, lower, upper))
+    return bins
 
 class FFTApp(QWidget):
     def __init__(self):
@@ -43,14 +51,15 @@ class FFTApp(QWidget):
 
         self.combo.currentIndexChanged.connect(self.start_stream)
 
-        self.note_names, self.note_positions = self.generate_note_labels()
+        self.note_bins = get_note_bins()
+        self.note_names = [self.midi_to_note_name(m) for m, _, _, _ in self.note_bins]
+        self.note_positions = list(range(len(self.note_bins)))
         self.fft_bars = pg.BarGraphItem(x=self.note_positions, height=[0]*len(self.note_positions), width=1, brush='y')
         self.plot_widget.addItem(self.fft_bars)
         self.max_magnitude = 1.0
         self.plot_widget.setYRange(0, self.max_magnitude)
         self.plot_widget.setLogMode(x=True, y=False)
         self.plot_widget.setXRange(0, len(self.note_positions))
-        self.note_labels = self.generate_note_labels()
         axis = self.plot_widget.getAxis('bottom')
         axis.setTicks([[ (pos, name) for pos, name in zip(self.note_positions, self.note_names) if pos > 0 ]])
 
@@ -61,6 +70,10 @@ class FFTApp(QWidget):
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_plot)
         self.timer.start(30)
+
+    def midi_to_note_name(self, midi):
+        notes = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
+        return notes[midi % 12] + str(midi // 12 - 1)
 
     def start_stream(self, index):
         if self.stream:
@@ -87,18 +100,6 @@ class FFTApp(QWidget):
         fft = np.abs(np.fft.rfft(windowed))
         self.fft_data = fft
 
-    def generate_note_labels(self):
-        notes = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
-        note_names = []
-        positions = []
-        for midi in range(21, 109):  # A0 to C8
-            freq = 440 * 2 ** ((midi - 69) / 12)
-            if 27.5 <= freq <= 4186:
-                note = notes[midi % 12] + str(midi // 12 - 1)
-                note_names.append(note)
-                positions.append(midi - 21)
-        return note_names, positions
-
     def update_plot(self):
         freqs = np.fft.rfftfreq(FFT_SIZE, 1 / SAMPLE_RATE)
         mag = self.fft_data.copy()
@@ -120,24 +121,13 @@ class FFTApp(QWidget):
             self.max_magnitude = peak
             self.plot_widget.setYRange(0, self.max_magnitude)
 
-                        # Convert frequencies to note bin indexes
-        note_bins = []
+        bar_heights = [0] * len(self.note_bins)
         for i, f in enumerate(freqs):
-            if f <= 0:
-                continue
-            try:
-                midi = int(round(69 + 12 * np.log2(f / 440)))
-                index = midi - 21
-                if 0 <= index < len(self.note_positions):
-                    note_bins.append((index, mag[i]))
-            except ValueError:
-                continue
-
-
-        bar_heights = [0] * len(self.note_positions)
-        for i, h in note_bins:
-            if i < len(bar_heights):
-                bar_heights[i] = max(bar_heights[i], h)  # max magnitude per note bin
+            m = mag[i]
+            for j, (_, _, low, high) in enumerate(self.note_bins):
+                if low <= f < high:
+                    bar_heights[j] = max(bar_heights[j], m)
+                    break
 
         self.fft_bars.setOpts(x=self.note_positions, height=bar_heights, width=1, brush='y')
 
@@ -152,7 +142,8 @@ class FFTApp(QWidget):
         if filename:
             with open(filename, 'w', newline='') as f:
                 writer = csv.writer(f)
-                writer.writerow(["Frequency (Hz)", "Raw Magnitude", "Filtered Magnitude"])
-                for freq, raw, filt in zip(self.snapshot_freqs, self.snapshot_raw, self.snapshot_filtered):
-                    writer.writerow([f"{freq:.2f}", f"{raw:.6f}", f"{filt:.6f}"])
-
+                writer.writerow(["Note", "Center Frequency (Hz)", "Raw Magnitude", "Filtered Magnitude"])
+                for (midi, center, low, high), name in zip(self.note_bins, self.note_names):
+                    raw_mag = max([r for f, r in zip(self.snapshot_freqs, self.snapshot_raw) if low <= f < high] or [0])
+                    filt_mag = max([r for f, r in zip(self.snapshot_freqs, self.snapshot_filtered) if low <= f < high] or [0])
+                    writer.writerow([name, f"{center:.2f}", f"{raw_mag:.6f}", f"{filt_mag:.6f}"])
